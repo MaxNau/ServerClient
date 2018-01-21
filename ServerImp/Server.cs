@@ -8,13 +8,30 @@ using System.Threading.Tasks;
 
 namespace ServerImp
 {
+    public class DataReceivedeEventArgs : EventArgs
+    {
+        public DataReceivedeEventArgs(string json)
+        {
+            Json = json;
+        }
+
+        public string Json { get; set; }
+    }
+
     public class Server
     {
         private Socket _server;
 
+        public event EventHandler<DataReceivedeEventArgs> DataReceived;
+
         public Server()
         {
             _server = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+        }
+
+        public void OnDataReceived(string json)
+        {
+            DataReceived?.Invoke(this, new DataReceivedeEventArgs(json));
         }
 
         public void Start()
@@ -30,6 +47,7 @@ namespace ServerImp
             _client.ReceiveBufferSize = 1;
             var state = new State();
             state.Client = _client;
+            state.Client.ReceiveBufferSize = 2000000;
             state.Client.BeginReceive(state.Buffer, 0, state.Buffer.Length, SocketFlags.None, new AsyncCallback(OnReceive), state);
         }
 
@@ -37,7 +55,7 @@ namespace ServerImp
         {
             var streamPosition = 0;
 
-            Console.WriteLine(ar.CompletedSynchronously);
+            //Console.WriteLine(ar.CompletedSynchronously);
             var state = ar.AsyncState as State;
             var dataLength = state.Client.EndReceive(ar);
             state.StreamBytesToReceive = dataLength;
@@ -55,7 +73,8 @@ namespace ServerImp
                     {
                         state.IsHeaderPartial = true;
                         state.PartialHeaderBytes = state.Buffer.Skip(streamPosition).ToArray();
-                        streamPosition = state.PartialHeaderBytes.Length;
+                        streamPosition += state.PartialHeaderBytes.Length;
+                        state.StreamBytesToReceive -= state.PartialHeaderBytes.Length;
                         break;
                     }
 
@@ -76,90 +95,130 @@ namespace ServerImp
                         state.Header.MessageType = BitConverter.ToInt32(headerBuffer, streamPosition);
                         state.Header.MessageLength = BitConverter.ToInt32(headerBuffer, streamPosition + 4);
                         streamPosition += 8 - state.PartialHeaderBytes.Length;
+                        state.StreamBytesToReceive -= streamPosition;
                         state.PartialHeaderBytes = null;
                         state.IsHeaderPartial = false;
                     }
 
                 }
 
-                if (streamPosition >= state.Header.MessageLength && state.StreamBytesToReceive >= state.Header.MessageLength || state.IsMessageParial == true)
+                if (state.IsMessageParial)
                 {
-                    if (state.Message.Length == 0)
+                    if (state.MessageBytesToReceive > state.StreamBytesToReceive)
                     {
                         state.Message.AppendFormat("{0}",
-                                  Encoding.UTF8.GetString(state.Buffer, streamPosition, state.Header.MessageLength));
-                        Console.WriteLine(state.Message.ToString());
-                        streamPosition += state.Header.MessageLength;
-                        state.StreamBytesToReceive -= state.Header.MessageLength;
-                        state.Header = null;
-                        state.Message = new StringBuilder();
+                                            Encoding.UTF8.GetString(state.Buffer, streamPosition,state.StreamBytesToReceive));
+                        streamPosition += state.StreamBytesToReceive;
+                        state.MessageBytesReceived += state.StreamBytesToReceive;
+                        state.MessageBytesToReceive -= state.StreamBytesToReceive;
+                        state.StreamBytesToReceive -= state.StreamBytesToReceive;
+                        break;
                     }
                     else
                     {
-                        var s = state.Message.Length;
+                        var messageBytesLeft = state.Header.MessageLength - state.Message.Length;
                         state.Message.AppendFormat("{0}",
-                                 Encoding.UTF8.GetString(state.Buffer, streamPosition, state.Header.MessageLength - s));
-                        Console.WriteLine(state.Message.ToString());
-                        streamPosition += state.Header.MessageLength - s;
-                        state.StreamBytesToReceive -= state.Header.MessageLength - s;
+                                             Encoding.UTF8.GetString(state.Buffer, streamPosition, messageBytesLeft));
+                        streamPosition += messageBytesLeft;
+
+                        //Console.WriteLine(state.Message.ToString());
+                        OnDataReceived(state.Message.ToString());
+
+                        state.StreamBytesToReceive -= messageBytesLeft;
+                        state.MessageBytesReceived += messageBytesLeft;
+                        state.MessageBytesToReceive -= messageBytesLeft;
+                        state.MessageBytesReceived = 0;
                         state.Header = null;
                         state.Message = new StringBuilder();
+                        state.IsMessageParial = false;
                     }
                 }
                 else
                 {
-                    state.Message.AppendFormat("{0}",
-                              Encoding.UTF8.GetString(state.Buffer, streamPosition, state.StreamBytesToReceive));
-                    streamPosition += streamPosition - state.Header.MessageLength;
-                    state.IsMessageParial = true;
+                    if (streamPosition >= state.Header.MessageLength && state.StreamBytesToReceive >= state.Header.MessageLength)
+                    {
+                        if (streamPosition != state.Buffer.Length)
+                        {
+                            if (state.Message.Length == 0 && state.StreamBytesToReceive >= state.Header.MessageLength)
+                            {
+                                state.Message.AppendFormat("{0}",
+                                          Encoding.UTF8.GetString(state.Buffer, streamPosition, state.Header.MessageLength));
+
+                                //Console.WriteLine(state.Message.ToString());
+                                OnDataReceived(state.Message.ToString());
+
+                                streamPosition += state.Header.MessageLength;
+                                state.StreamBytesToReceive -= state.Header.MessageLength;
+                                state.Header = null;
+                                state.Message = new StringBuilder();
+                            }
+                            else
+                            {
+                                var s = state.Message.Length;
+                                state.Message.AppendFormat("{0}",
+                                         Encoding.UTF8.GetString(state.Buffer, streamPosition, state.Header.MessageLength));
+
+                                //Console.WriteLine(state.Message.ToString());
+                                OnDataReceived(state.Message.ToString());
+
+                                streamPosition += state.Header.MessageLength - s;
+                                state.StreamBytesToReceive -= state.Header.MessageLength - s;
+                                state.Header = null;
+                                state.Message = new StringBuilder();
+                            }
+                        }
+                    }
+                    else
+                    {
+                        if (state.StreamBytesToReceive == state.Header.MessageLength)
+                        {
+                            state.Message.AppendFormat("{0}",
+                                      Encoding.UTF8.GetString(state.Buffer, streamPosition, state.Header.MessageLength));
+
+                            //Console.WriteLine(state.Message.ToString());
+                            OnDataReceived(state.Message.ToString());
+
+                            streamPosition += state.Header.MessageLength;
+                            state.StreamBytesToReceive -= state.Header.MessageLength;
+                            state.Header = null;
+                            state.Message = new StringBuilder();
+                        }
+                        else if (state.StreamBytesToReceive < state.Header.MessageLength)
+                        {
+                            state.Message.AppendFormat("{0}",
+                                      Encoding.UTF8.GetString(state.Buffer, streamPosition, state.StreamBytesToReceive));
+                            //Console.WriteLine(state.Message.ToString());
+                            streamPosition += state.StreamBytesToReceive;
+                            state.MessageBytesReceived += state.StreamBytesToReceive;
+                            state.MessageBytesToReceive = state.Header.MessageLength - state.StreamBytesToReceive;
+                            state.StreamBytesToReceive -= state.StreamBytesToReceive;
+                            state.IsMessageParial = true;
+                        }
+                        else
+                        {
+                            state.Message.AppendFormat("{0}",
+                                     Encoding.UTF8.GetString(state.Buffer, streamPosition, state.Header.MessageLength));
+
+                            //Console.WriteLine(state.Message.ToString());
+                            OnDataReceived(state.Message.ToString());
+
+                            streamPosition += state.Header.MessageLength;
+                            state.StreamBytesToReceive -= state.Header.MessageLength;
+                            state.Header = null;
+                            state.Message = new StringBuilder();
+                        }
+                    }
                 }
-
-                //if (state.IsMessageParial)
-                //{
-                //    if (state.IsFirstPart)
-                //    {
-                //        state.Message.AppendFormat("{0}",
-                //           Encoding.UTF8.GetString(state.Buffer, 8, dataLength - 8));
-                //        state.IsFirstPart = false;
-                //        state.MessageBytesReceived += dataLength - 8;
-                //    }
-                //    else
-                //    {
-                //        state.Message.AppendFormat("{0}",
-                //           Encoding.UTF8.GetString(state.Buffer, 0, state.Header.MessageLength - state.MessageBytesReceived));
-
-                //        streamPosition = state.Header.MessageLength - state.MessageBytesReceived;
-                //        state.MessageBytesReceived += state.Header.MessageLength - state.MessageBytesReceived;
-                //    }
-
-                //    Console.WriteLine(state.Message.ToString());
-
-                //    if (state.MessageBytesReceived == state.Header.MessageLength)
-                //    {
-
-                //    }
-
 
             }
 
             state.Client.BeginReceive(state.Buffer, 0, state.Buffer.Length, SocketFlags.None, new AsyncCallback(OnReceive), state);
-            //else
-            //{
-            //    state.Message.AppendFormat("{0}",
-            //        Encoding.UTF8.GetString(state.Buffer, 8, state.Header.MessageLength));
-
-            //    Console.WriteLine(state.Message.ToString());
-
-            //    state.ResetState();
-
-
-            //}
         }
     }
 
     public class State
     {
-        private int BUFFER_SIZE = 33;
+        private int BUFFER_SIZE = 4096;
         public bool IsHeaderPartial { get; set; }
         public bool IsMessageParial { get; set; }
         public Header Header { get; set; }
@@ -169,6 +228,7 @@ namespace ServerImp
         public Socket Client { get; set; }
         public bool IsFirstPart { get; set; }
         public int MessageBytesReceived { get; set; }
+        public int MessageBytesToReceive { get; set; }
         public int StreamBytesToReceive { get; set; }
 
         public State()
